@@ -140,7 +140,7 @@ python run.py --model finetune_tabpfn3.0 --policy standard --k_core 15 --epochs 
 1. TabPFN/TabICL become difficult to use on very large datasets; the preprocessing design is partly motivated by this computational constraint.
 2. The implemented split is user-grouped train/test with 1 positive + 1 negative per user in test; there is no separate validation split in the current flow, mainly due to the computational constraints of TabPFN and TabICL.
 3. Additional user/video features exist in the repository but are currently not joined; evaluating expanded feature sets is too expensive under TabPFN compute constraints.
-4. TabPFN 2.0 was not evaluated because it does not support more than 50k rows.
+4. TabPFN 2.0 was not evaluated because it does not support more than 10k rows.
 
 ## Why This Setup Matches the Goal
 
