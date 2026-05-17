@@ -11,47 +11,8 @@ from typing import Callable
 
 def split_group_by_user(
     df: pd.DataFrame,
-    ratios=(0.8, 0.1, 0.1),
     seed: int = SEED,
 ):
-    """
-    Split per-user con vincoli minimi:
-
-    - se un utente ha 1 interazione:
-        train=0, valid=0, test=1
-
-    - se un utente ha 2 interazioni:
-        train=0, valid=1, test=1
-
-    - se un utente ha 3 interazioni:
-        train=1, valid=1, test=1
-
-    - se un utente ha >3 interazioni:
-        split circa 80/10/10, ma garantendo almeno:
-        train >= 1, valid >= 1, test >= 1
-
-    Parametri
-    ---------
-    df:
-        DataFrame contenente le interazioni.
-
-    user_col:
-        Nome della colonna utente.
-
-    ratios:
-        Proporzioni train/valid/test.
-
-    seed:
-        Seed per lo shuffle.
-
-
-    Ritorna
-    -------
-    train_df, valid_df, test_df
-    """
-    # maximum_size = 200_000
-    assert abs(sum(ratios) - 1.0) < 1e-8
-    assert len(ratios) == 3
 
     rng = np.random.default_rng(seed)
 

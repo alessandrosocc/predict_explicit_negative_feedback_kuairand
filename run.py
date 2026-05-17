@@ -98,20 +98,14 @@ if __name__ == "__main__":
         model = get_model(args, model_name)
 
         # Split the dataset into train, validation, and test sets, grouped by user id
-        train_df, test_df = split_group_by_user(dataset, ratios=(0.6, 0.2, 0.2))
-
+        train_df, test_df = split_group_by_user(dataset)
 
         print("Train set size:", len(train_df))
         print("Test set size:", len(test_df))
 
-
-        # Keep feature names before vectorization (numpy arrays do not have .columns).
-        feature_names = [c for c in test_df.columns if c != "label"]
-
         # Create chunks first, then merge into single arrays for model APIs.
         train_data, train_labels = vectorize_data(train_df)
         test_data, test_labels = vectorize_data(test_df)
-
 
         # Training
         data = (train_data, train_labels)
@@ -130,9 +124,12 @@ if __name__ == "__main__":
         show_results(args, model_name, labels, preds, split_name="Test")
         print("Evaluation completed.")
 
+
         if model_name in ['tabpfn3.0', 'tabpfn2.6', 'tabpfn2.5'] and args.explain:
             from tabpfn_extensions.interpretability.shap import get_shap_values, plot_shap
             import shap
+            # Keep feature names before vectorization (numpy arrays do not have .columns).
+            feature_names = [c for c in test_df.columns if c != "label"]
 
             # select randomly 100 samples from the test set to compute SHAP values
             # too slow, not usable in practice.

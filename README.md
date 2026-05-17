@@ -12,7 +12,7 @@ The focus is not to maximize positive prediction (which is abundant), but to imp
 
 ## Dataset
 
-- Source: **KuaiRand-27K** (files in `KuaiRand-27K/`)
+- Source: **KuaiRand-27K** (https://kuairand.com)
 - Supported policies:
 1. `standard` (default)
 2. `random`
@@ -66,10 +66,10 @@ This guarantees:
 
 ### Foundation / transformer-based models for tabular data
 
-1. `tabpfn2.5`
-2. `tabpfn2.6`
-3. `tabpfn3.0`
-4. `tabicl`
+1. `tabpfn2.5` 
+2. `tabpfn2.6` 
+3. `tabpfn3.0` (https://github.com/PriorLabs/TabPFN)
+4. `tabicl` (ICML 2026 https://github.com/soda-inria/tabicl)
 
 ### Classical baselines
 
@@ -83,10 +83,9 @@ This guarantees:
 
 Test metrics are saved for both classes (`0` unliked, `1` liked):
 
-1. Precision
-2. Recall
+1. Recall
+2. Precision
 3. F1-score
-4. Support
 
 Output format: `results/{model}_{policy}_kcore_{k}_results.csv` (TSV).
 
