@@ -2,3 +2,4 @@ catboost_info/
 __pycache__
 KuaiRand-27K/
 .venv/
+hf_llama_gen_finetuned/

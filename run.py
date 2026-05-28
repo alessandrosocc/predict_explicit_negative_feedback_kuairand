@@ -7,6 +7,250 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import re
+
+
+def _format_feature_row(row, feature_names):
+    def _format_feature_value(value):
+        if isinstance(value, (bool, np.bool_)):
+            return "true" if bool(value) else "false"
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            if float(value) == 0.0:
+                return "false"
+            if float(value) == 1.0:
+                return "true"
+        return str(value)
+
+    if feature_names and len(feature_names) == len(row):
+        return "\n".join(f"- {name}: {_format_feature_value(value)}" for name, value in zip(feature_names, row))
+    return "\n".join(f"- f{i}: {_format_feature_value(value)}" for i, value in enumerate(row))
+
+
+def _label_to_int(text):
+    if text.startswith("0"):
+        return 0
+    return 1
+
+
+def _build_binary_feedback_prompt(row, feature_names):
+    row_repr = _format_feature_row(row, feature_names)
+    return (
+        "Features:\n"
+        f"{row_repr}\n"
+        "\n"
+        "Task: binary classification (user liked item).\n"
+        "Rules: return only 1 (liked) or 0 (unliked).\n"
+        "Label:"
+    )
+
+
+class HuggingFaceLlamaGenerator:
+    def __init__(self, model, device_map="auto", max_new_tokens=2, quantization="none"):
+        self.model = model
+        self.device_map = device_map
+        # Some tokenizers emit a leading whitespace token, so 1 token can be empty after strip.
+        self.max_new_tokens = max_new_tokens
+        self.quantization = quantization
+        self._pipe = None
+        self._pad_token_id = None
+        self._generation_config = None
+        self.feature_names = None
+
+    def set_feature_names(self, feature_names):
+        self.feature_names = list(feature_names)
+        return self
+
+    def fit(self, X, y):
+        # Inference-only baseline, kept for sklearn-like compatibility.
+        from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline
+        tokenizer = AutoTokenizer.from_pretrained(self.model)
+        tokenizer.padding_side = "left"
+        tokenizer.pad_token = tokenizer.eos_token
+        q = (self.quantization or "none").lower()
+        if self.quantization == "4bit":
+            model_obj = AutoModelForCausalLM.from_pretrained(
+                self.model,
+                device_map=self.device_map,
+                load_in_4bit=True,
+            )
+        elif self.quantization == "8bit":
+            model_obj = AutoModelForCausalLM.from_pretrained(
+                self.model,
+                device_map=self.device_map,
+                load_in_8bit=True,
+            )
+        elif q == "none":
+            model_obj = AutoModelForCausalLM.from_pretrained(
+                self.model,
+                device_map=self.device_map,
+            )
+        else:
+            raise ValueError("Invalid hf_quantization. Use one of: none, 8bit, 4bit")
+        self._pad_token_id = tokenizer.pad_token_id
+        self._pipe = pipeline(
+            "text-generation",
+            model=model_obj,
+            tokenizer=tokenizer,
+            device_map=self.device_map,
+        )
+        # Force a clean deterministic generation config to avoid warnings
+        # from checkpoints that embed sampling-only params (e.g. top_p, temperature).
+        self._generation_config = GenerationConfig(
+            do_sample=False,
+            max_new_tokens=self.max_new_tokens,
+            pad_token_id=self._pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        return self
+
+    def _build_prompt(self, row):
+        return _build_binary_feedback_prompt(row, self.feature_names)
+    
+    def predict(self, X):
+        prompts = [self._build_prompt(row) for row in X]
+        out = self._pipe(
+            prompts,
+            generation_config=self._generation_config,
+            return_full_text=False,
+            batch_size=16,
+        )
+        preds = []
+        for p in out:
+            text = p[0]["generated_text"].strip()
+            preds.append(_label_to_int(text))
+        return np.array(preds, dtype=int)
+
+
+class HuggingFaceLlamaGeneratorFinetune:
+    # compact PEFT-enabled finetune: do NOT use quantized model for training
+    def __init__(self, model, epochs=1, learning_rate=2e-5, max_length=512, batch_size=1, max_new_tokens=3, quantization="none"):
+        self.model = model
+        self.epochs = epochs
+        self.learning_rate = learning_rate
+        self.max_length = max_length
+        self.batch_size = batch_size
+        self.max_new_tokens = max_new_tokens
+        self.quantization = quantization
+        self.tokenizer = None
+        self.model_obj = None
+        self._pipe = None
+        self._generation_config = None
+        self.feature_names = None
+        safe_name = self.model.replace("/", "__")
+        self.output_dir = os.path.join("results", "hf_llama_gen_finetuned", safe_name)
+
+    def set_feature_names(self, feature_names):
+        self.feature_names = list(feature_names)
+        return self
+
+    def fit(self, X, y):
+        # Use PEFT (LoRA) on a full (non-quantized) base model.
+        from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, GenerationConfig, pipeline
+        from torch.utils.data import Dataset
+        from peft import LoraConfig, PeftModel, get_peft_model, TaskType
+
+        # load tokenizer and full-precision model for training
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model)
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        adapter_exists = os.path.exists(os.path.join(self.output_dir, "adapter_config.json"))
+        if adapter_exists:
+            # Reuse an existing finetuned adapter if already present.
+            base_model = AutoModelForCausalLM.from_pretrained(self.model, device_map="auto")
+            self.model_obj = PeftModel.from_pretrained(base_model, self.output_dir)
+            self._pipe = pipeline("text-generation", model=self.model_obj, tokenizer=self.tokenizer, device_map="auto")
+            self._generation_config = GenerationConfig(
+                do_sample=False,
+                max_new_tokens=self.max_new_tokens,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+            return self
+
+        # IMPORTANT: do not pass load_in_4bit/load_in_8bit here
+        self.model_obj = AutoModelForCausalLM.from_pretrained(self.model, device_map="auto")
+        # reduce memory: disable cache and enable gradient checkpointing
+        try:
+            self.model_obj.config.use_cache = False
+        except Exception:
+            pass
+        try:
+            self.model_obj.gradient_checkpointing_enable()
+        except Exception:
+            pass
+
+        # attach LoRA adapters
+        peft_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            inference_mode=False,
+            r=8,
+            lora_alpha=32,
+            lora_dropout=0.1,
+        )
+        self.model_obj = get_peft_model(self.model_obj, peft_config)
+
+        texts = [(_build_binary_feedback_prompt(r, self.feature_names) + " " + str(int(l))).strip() for r, l in zip(X, y)]
+        enc = self.tokenizer(texts, truncation=True, padding=True, max_length=self.max_length, return_tensors="pt")
+
+        class _DS(Dataset):
+            def __init__(self, enc):
+                self.enc = enc
+            def __len__(self):
+                return self.enc["input_ids"].size(0)
+            def __getitem__(self, i):
+                item = {k: v[i] for k, v in self.enc.items()}
+                item["labels"] = item["input_ids"].clone()
+                return item
+
+        trainer = Trainer(
+            model=self.model_obj,
+            args=TrainingArguments(
+                output_dir=self.output_dir,
+                overwrite_output_dir=True,
+                num_train_epochs=self.epochs,
+                learning_rate=self.learning_rate,
+                per_device_train_batch_size=self.batch_size,
+                logging_steps=50,
+                save_strategy="no",
+                report_to=[],
+                # Enable mixed precision training in 16-bit.
+                fp16=True,
+                bf16=False,
+            ),
+            train_dataset=_DS(enc),
+        )
+        trainer.train()
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.model_obj.save_pretrained(self.output_dir)
+        self.tokenizer.save_pretrained(self.output_dir)
+
+        # inference can be quantized later if desired; use pipeline from trained model
+        self._pipe = pipeline("text-generation", model=self.model_obj, tokenizer=self.tokenizer, device_map="auto")
+        self._generation_config = GenerationConfig(
+            do_sample=False,
+            max_new_tokens=self.max_new_tokens,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+        return self
+
+    def predict(self, X):
+        prompts = [_build_binary_feedback_prompt(r, self.feature_names) for r in X]
+        out = self._pipe(
+            prompts,
+            generation_config=self._generation_config,
+            return_full_text=False,
+            batch_size=8,
+        )
+        preds = []
+        for p in out:
+            text = p[0]["generated_text"].strip()
+            preds.append(_label_to_int(text))
+        return np.array(preds, dtype=int)
+
+
 
 
 def get_model(args, model_name):
@@ -53,8 +297,30 @@ def get_model(args, model_name):
     elif model_name == 'tabicl':
         from tabicl import TabICLClassifier
         return TabICLClassifier(random_state=SEED)
+    elif model_name == "llama_gen":
+        return HuggingFaceLlamaGenerator(
+            model=args.hf_model,
+            device_map=args.hf_device_map,
+            max_new_tokens=args.hf_max_new_tokens,
+            quantization=args.hf_quantization,
+        )
+    elif model_name == "llama_gen_finetune":
+        return HuggingFaceLlamaGeneratorFinetune(
+            model=args.hf_model,
+            epochs=args.hf_epochs,
+            learning_rate=args.hf_learning_rate,
+            max_length=args.hf_max_length,
+            batch_size=args.hf_batch_size,
+            max_new_tokens=args.hf_max_new_tokens,
+            quantization=args.hf_quantization,
+        )
     else:
-        raise ValueError("Invalid model name. Options: tabpfn, xgboost, lightgbm, catboost, random forest")
+        raise ValueError(
+            "Invalid model name. Options: tabpfn2.5, tabpfn2.6, tabpfn3.0, finetune_tabpfn3.0, "
+            "xgboost, lightgbm, catboost, randomforest, random, tabicl, "
+            "llama_gen "
+            "llama_gen_finetune, llama_class_finetune"
+        )
 
 
 
@@ -77,17 +343,71 @@ def evaluate(model, data):
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
-    args.add_argument("--model", type=str, default="tabpfn", help="The model to train. Options: tabpfn, xgboost, lightgbm")
+    args.add_argument(
+        "--model",
+        type=str,
+        default="tabpfn3.0",
+        help=(
+            "Comma-separated models. Supports tabpfn2.5, tabpfn2.6, tabpfn3.0, finetune_tabpfn3.0, "
+            "xgboost, lightgbm, catboost, randomforest, random, tabicl, "
+            "llama_gen, llama_class, "
+            "llama_gen_finetune, llama_class_finetune"
+        ),
+    )
     args.add_argument("--policy", type=str, default="standard", help="The policy to use. Options: standard, random")
     args.add_argument("--k_core", type=int, default=5, help="The k-core to use.")
     # in case of finetuning tabpfn3.0, we want to specify the number of epochs and learning rate
     args.add_argument("--epochs", type=int, default=5, help="The number of epochs to finetune tabpfn3.0")
     args.add_argument("--learning_rate", type=float, default=2e-5, help="The learning rate to finetune tabpfn3.0")
+    args.add_argument(
+        "--hf_model",
+        type=str,
+        default="meta-llama/Llama-3.2-1B-Instruct",
+        help=(
+            "Hugging Face model id. Used with llama_gen/llama-class and finetune variants. "
+            "For llama_class inference/fine-tuning, use a sequence-classification-compatible model."
+        ),
+    )
+    args.add_argument(
+        "--hf_device_map",
+        type=str,
+        default="auto",
+        help="Device map for HF generation pipeline. Used with --model llama_gen",
+    )
+    args.add_argument(
+        "--hf_max_new_tokens",
+        type=int,
+        default=3,
+        help="Max new tokens for generation. Used with --model llama_gen",
+    )
+    args.add_argument(
+        "--hf_quantization",
+        type=str,
+        default="4bit",
+        choices=["none", "8bit", "4bit"],
+        help="Quantization mode for HF models. Use 4bit for lowest VRAM.",
+    )
+    args.add_argument("--hf_epochs", type=int, default=5, help="Epochs for llama_*_finetune")
+    args.add_argument("--hf_learning_rate", type=float, default=2e-5, help="Learning rate for llama_*_finetune")
+    args.add_argument("--hf_max_length", type=int, default=1024, help="Max token length for llama_class and llama_*_finetune")
+    args.add_argument("--hf_batch_size", type=int, default=8, help="Batch size for llama_class and llama_*_finetune")
+    args.add_argument("--device", type=str, default="cuda:1", help="Device to use, e.g. cpu or cuda:1")
     # explainability
     args.add_argument("--explain", type=bool, default=False, help="Whether to compute SHAP values for tabpfn models (only for tabpfn2.5, tabpfn2.6 and tabpfn3.0)")
     args = args.parse_args()
 
-    setproctitle.setproctitle(f"Predicting explicit negative feedback in short-video recsys with {args.model}")
+    # Configure CUDA device without using CUDA_VISIBLE_DEVICES
+    try:
+        import torch
+        if isinstance(args.device, str) and args.device.startswith("cuda:"):
+            idx = int(args.device.split(":", 1)[1])
+            torch.cuda.set_device(idx)
+        # Mirror hf_device_map to keep backward compatibility with existing code
+        args.hf_device_map = args.device
+    except Exception:
+        pass
+
+    setproctitle.setproctitle(f"Predicting explicit negative feedback in short-video recsys ")
 
     dataset = get_dataset(args)
     
@@ -103,6 +423,10 @@ if __name__ == "__main__":
         print("Train set size:", len(train_df))
         print("Test set size:", len(test_df))
 
+        feature_names = [c for c in train_df.columns if c != "label"]
+        if hasattr(model, "set_feature_names"):
+            model.set_feature_names(feature_names)
+
         # Create chunks first, then merge into single arrays for model APIs.
         train_data, train_labels = vectorize_data(train_df)
         test_data, test_labels = vectorize_data(test_df)
@@ -111,6 +435,13 @@ if __name__ == "__main__":
         data = (train_data, train_labels)
 
         model, time = train(model, data)
+
+        if model_name in ['llama_gen_finetune']:
+            model_name="Llama-3.2-1B-Instruct_PEFT"
+        elif model_name in ['llama_gen']:
+            model_name="Llama-3.2-1B-Instruct_zero-shot"
+
+
         print("Training completed.")
         track_time[model_name]["train"] = str(time)
 

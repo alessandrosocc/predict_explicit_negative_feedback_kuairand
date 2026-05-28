@@ -71,6 +71,19 @@ This guarantees:
 3. `tabpfn3.0` (https://github.com/PriorLabs/TabPFN)
 4. `tabicl` (ICML 2026 https://github.com/soda-inria/tabicl)
 
+### LLM-based models (LLAMA)
+
+1. `llama_gen` (zero-shot generative classification)
+2. `llama_gen_finetune` (PEFT/LoRA fine-tuning + generative inference)
+
+Current default base model:
+- `meta-llama/Llama-3.2-1B-Instruct`
+
+Implementation notes:
+- Fine-tuning is done with **PEFT (LoRA adapters)**, so only adapter weights are trained/saved instead of full model weights.
+- Training uses **reduced precision (bf16/fp16 depending hardware/runtime support)** to reduce VRAM footprint and storage pressure.
+- Saved adapters are automatically reused from `results/hf_llama_gen_finetuned/` if already present.
+
 ### Classical baselines
 
 1. `xgboost`
@@ -134,12 +147,26 @@ python make_plots.py
 python run.py --model finetune_tabpfn3.0 --policy standard --k_core 15 --epochs 5 --learning_rate 2e-5
 ```
 
+### 5) LLAMA zero-shot (optional)
+
+```bash
+python run.py --model llama_gen --policy standard --k_core 15 --hf_model meta-llama/Llama-3.2-1B-Instruct --device cuda:0
+```
+
+### 6) LLAMA PEFT fine-tuning + inference (optional)
+
+```bash
+python run.py --model llama_gen_finetune --policy standard --k_core 15 --hf_model meta-llama/Llama-3.2-1B-Instruct --hf_epochs 5 --hf_learning_rate 2e-5 --device cuda:0
+```
+
 ## Important Notes and Known Limitations
 
 1. TabPFN/TabICL become difficult to use on very large datasets; the preprocessing design is partly motivated by this computational constraint.
 2. The implemented split is user-grouped train/test with 1 positive + 1 negative per user in test; there is no separate validation split in the current flow, mainly due to the computational constraints of TabPFN and TabICL.
 3. Additional user/video features exist in the repository but are currently not joined; evaluating expanded feature sets is too expensive under TabPFN compute constraints.
 4. TabPFN 2.0 was not evaluated because it does not support more than 10k rows.
+5. For LLAMA fine-tuning, the repository stores PEFT adapters (not full checkpoints) to keep artifacts lightweight and easier to reuse.
+6. Reduced-precision training (bf16/fp16) is used to lower memory usage; exact mode depends on GPU/runtime support.
 
 ## Why This Setup Matches the Goal
 

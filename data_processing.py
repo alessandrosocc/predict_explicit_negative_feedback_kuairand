@@ -2,13 +2,6 @@ import polars as pl
 import argparse
 import os
 
-
-# def _load_video_features():
-#     video_features_df_pt1 = pl.read_csv(os.path.join('KuaiRand-27K', 'video_features_statistic_27k_part1.csv'))
-#     video_features_df_pt2 = pl.read_csv(os.path.join('KuaiRand-27K', 'video_features_statistic_27k_part2.csv'))
-#     video_features_df_pt3 = pl.read_csv(os.path.join('KuaiRand-27K', 'video_features_statistic_27k_part3.csv'))
-#     return pl.concat([video_features_df_pt1, video_features_df_pt2, video_features_df_pt3], how='vertical')
-
 def _make_user_k_core(df, args):
     # make user k-core
     valid_user_ids = (
@@ -29,10 +22,6 @@ def _make_item_k_core(df, args):
     )
     return df.filter(pl.col("video_id").is_in(valid_video_ids))
 
-# def _load_user_features():
-#     return pl.read_csv(os.path.join('KuaiRand-27K', 'user_features_27k.csv'))
-
-
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
@@ -48,18 +37,7 @@ if __name__ == "__main__":
         df = pl.read_csv(os.path.join('KuaiRand-27K', 'log_random_4_22_to_5_08_27k.csv'))
     else:
         raise ValueError("Invalid policy. Options: normal, random")
-    
-    # user_df = _load_user_features()
-    # video_features_df = _load_video_features()
 
-    # select only data where is_like or is_hate is one
-    df = df.filter((pl.col("is_like") == 1) | (pl.col("is_hate") == 1))
-
-    # select only numerical useful features
-    # user_df = user_df = user_df.select("user_id", "is_lowactive_period", "is_live_streamer", "is_video_author", "follow_user_num", "fans_user_num", "friend_user_num", "register_days")
-    # video_features_df = video_features_df.select("video_id", "show_cnt", "show_user_num", "play_cnt", "play_user_num", "play_duration", "complete_play_cnt", "complete_play_user_num", "valid_play_cnt", "valid_play_user_num", "long_time_play_cnt", "long_time_play_user_num", "short_time_play_cnt", "short_time_play_user_num", "play_progress", "comment_stay_duration", "like_cnt", "like_user_num", "click_like_cnt", "double_click_cnt", "cancel_like_cnt", "cancel_like_user_num", "comment_cnt", "comment_user_num", "comment_like_user_num", "follow_cnt", "follow_user_num", "cancel_follow_cnt", "cancel_follow_user_num", "share_cnt", "share_user_num", "download_cnt", "download_user_num", "report_cnt", "report_user_num", "collect_cnt", "collect_user_num", "cancel_collect_cnt", "cancel_collect_user_num", "direct_comment_user_num", "reply_comment_user_num", "share_all_cnt", "share_all_user_num", "outsite_share_all_cnt")
-    # df = df.join(user_df, on="user_id", how="left")
-    # df = df.join(video_features_df, on="video_id", how="left")
     
     # remove is_like or is_hate and create a new column "label" where is_like is 1 and is_hate is 0 then label is 1, if is_like is 0 and is_hate is 1 then label is 0, otherwise drop the row
     df = df.filter((pl.col("is_like") == 1) | (pl.col("is_hate") == 1))
@@ -95,21 +73,13 @@ if __name__ == "__main__":
     # concat negative samples where label==0 with positive_df
     negative_df = df.filter(pl.col("label") == 0)
     df = pl.concat([positive_df, negative_df], how='vertical')
-
-    valid_user_ids = (
-        df.group_by("user_id")
-        .agg(pl.col("label").n_unique().alias("label_types"))
-        .filter(pl.col("label_types") == 2)
-        .select("user_id")
-    )
-    df = df.join(valid_user_ids, on="user_id", how="inner")
     
     print()
     print(f"size after k-core: {df.shape}")
     print(f'positive feedbacks after k-core: {df.filter(pl.col("label") == 1).shape[0]}')
     print(f'negative feedbacks after k-core: {df.filter(pl.col("label") == 0).shape[0]}')
 
-    # remove column "ciao" and 'hello'
+    # remove useless columns
     df = df.drop(["profile_stay_time", "is_rand", "tab"])
 
 

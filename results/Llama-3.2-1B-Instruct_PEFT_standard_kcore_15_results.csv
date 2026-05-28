@@ -1,0 +1,5 @@
+metric	0 (unliked)	1 (liked)
+precision	0.0	0.5
+recall	0.0	1.0
+f1_score	0.0	0.6666666666666666
+support	664.0	664.0
